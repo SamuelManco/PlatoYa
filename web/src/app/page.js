@@ -4,23 +4,23 @@ import { useEffect, useMemo, useState } from "react";
 import { io } from "socket.io-client";
 import { API_URL, apiRequest } from "../lib/api";
 
-const CATEGORIES = ["Todos", "Bebidas", "Entradas", "Postres", "Principales"];
-const KANBAN_COLUMNS = [
-  { key: "PENDIENTE", label: "Pendiente", nextStatus: "PREPARING", nextLabel: "Pasar a En preparación" },
-  { key: "PREPARING", label: "En preparación", nextStatus: "READY", nextLabel: "Marcar Listo" },
-  { key: "READY", label: "Listo", nextStatus: "DELIVERED", nextLabel: "Marcar Entregado" },
+const CATEGORIES = ["Todos", "Ingeniería", "Ficción", "Negocios", "Ciencia"];
+const SHIPMENT_COLUMNS = [
+  { key: "PENDIENTE", label: "Por despachar", nextStatus: "PREPARING", nextLabel: "Empacar pedido" },
+  { key: "PREPARING", label: "Empacando", nextStatus: "READY", nextLabel: "Enviar a ruta" },
+  { key: "READY", label: "En camino", nextStatus: "DELIVERED", nextLabel: "Confirmar entrega" },
   { key: "DELIVERED", label: "Entregado", nextStatus: null, nextLabel: null },
 ];
 
 export default function HomePage() {
-  const [dishes, setDishes] = useState([]);
+  const [books, setBooks] = useState([]);
   const [selectedCategory, setSelectedCategory] = useState("Todos");
   const [cart, setCart] = useState([]);
   const [address, setAddress] = useState("");
   const [token, setToken] = useState("");
   const [user, setUser] = useState(null);
   const [orders, setOrders] = useState([]);
-  const [kitchenOrders, setKitchenOrders] = useState([]);
+  const [shipments, setShipments] = useState([]);
 
   const [authMode, setAuthMode] = useState("login");
   const [name, setName] = useState("");
@@ -29,19 +29,23 @@ export default function HomePage() {
   const [feedback, setFeedback] = useState("");
   const [loading, setLoading] = useState(false);
 
+  async function loadBooks() {
+    try {
+      const data = await apiRequest("/api/books");
+      setBooks(data.books || []);
+    } catch (err) {
+      setFeedback(err.message);
+    }
+  }
+
   useEffect(() => {
-    const savedToken = localStorage.getItem("platoya_token") || "";
-    const savedUser = localStorage.getItem("platoya_user");
+    const savedToken = localStorage.getItem("libroya_token") || "";
+    const savedUser = localStorage.getItem("libroya_user");
     if (savedToken && savedUser) {
       setToken(savedToken);
       setUser(JSON.parse(savedUser));
     }
-  }, []);
-
-  useEffect(() => {
-    apiRequest("/api/dishes")
-      .then((data) => setDishes(data.dishes || []))
-      .catch((err) => setFeedback(err.message));
+    loadBooks();
   }, []);
 
   useEffect(() => {
@@ -50,18 +54,16 @@ export default function HomePage() {
       apiRequest("/api/orders/me", { token })
         .then((data) => setOrders(data.orders || []))
         .catch(() => {});
-    } else if (user.role === "cocinero") {
-      apiRequest("/api/orders/kitchen", { token })
-        .then((data) => setKitchenOrders(data.orders || []))
+    } else if (user.role === "logistica") {
+      apiRequest("/api/orders/shipments", { token })
+        .then((data) => setShipments(data.orders || []))
         .catch(() => {});
     }
   }, [token, user]);
 
   useEffect(() => {
     if (!token || !user) return;
-    const socket = io(API_URL, {
-      auth: { token },
-    });
+    const socket = io(API_URL, { auth: { token } });
 
     socket.on("order:updated", (updatedOrder) => {
       if (user.role === "cliente") {
@@ -75,54 +77,51 @@ export default function HomePage() {
     });
 
     socket.on("order:created", (newOrder) => {
-      if (user.role === "cocinero") {
-        setKitchenOrders((prev) => {
-          if (prev.some((o) => o._id === newOrder._id)) return prev;
-          return [...prev, newOrder];
-        });
+      if (user.role === "logistica") {
+        setShipments((prev) => (prev.some((o) => o._id === newOrder._id) ? prev : [...prev, newOrder]));
       }
     });
 
     socket.on("order:statusChanged", (updatedOrder) => {
-      if (user.role === "cocinero") {
-        setKitchenOrders((prev) =>
-          prev.map((o) => (o._id === updatedOrder._id ? updatedOrder : o))
-        );
+      if (user.role === "logistica") {
+        setShipments((prev) => prev.map((o) => (o._id === updatedOrder._id ? updatedOrder : o)));
       }
     });
 
-    return () => {
-      socket.disconnect();
-    };
+    return () => socket.disconnect();
   }, [token, user]);
 
-  const filteredDishes = useMemo(() => {
-    if (selectedCategory === "Todos") return dishes;
-    return dishes.filter((d) => d.category === selectedCategory);
-  }, [dishes, selectedCategory]);
+  const filteredBooks = useMemo(() => {
+    if (selectedCategory === "Todos") return books;
+    return books.filter((b) => b.category === selectedCategory);
+  }, [books, selectedCategory]);
 
   const cartTotal = useMemo(
     () => cart.reduce((acc, item) => acc + item.price * item.quantity, 0),
     [cart]
   );
 
-  function addToCart(dish) {
-    if (!dish.available) return;
+  function addToCart(book) {
+    if (!book.available || book.stock <= 0) return;
     setCart((prev) => {
-      const existing = prev.find((i) => i._id === dish._id);
+      const existing = prev.find((i) => i._id === book._id);
       if (existing) {
-        return prev.map((i) =>
-          i._id === dish._id ? { ...i, quantity: i.quantity + 1 } : i
-        );
+        if (existing.quantity >= book.stock) return prev;
+        return prev.map((i) => (i._id === book._id ? { ...i, quantity: i.quantity + 1 } : i));
       }
-      return [...prev, { ...dish, quantity: 1 }];
+      return [...prev, { ...book, quantity: 1 }];
     });
   }
 
-  function updateQuantity(dishId, delta) {
+  function updateQuantity(bookId, delta) {
     setCart((prev) =>
       prev
-        .map((i) => (i._id === dishId ? { ...i, quantity: i.quantity + delta } : i))
+        .map((i) => {
+          if (i._id !== bookId) return i;
+          const nextQty = i.quantity + delta;
+          if (nextQty > i.stock) return i;
+          return { ...i, quantity: nextQty };
+        })
         .filter((i) => i.quantity > 0)
     );
   }
@@ -137,8 +136,8 @@ export default function HomePage() {
       const data = await apiRequest(endpoint, { method: "POST", body: payload });
       setToken(data.token);
       setUser(data.user);
-      localStorage.setItem("platoya_token", data.token);
-      localStorage.setItem("platoya_user", JSON.stringify(data.user));
+      localStorage.setItem("libroya_token", data.token);
+      localStorage.setItem("libroya_user", JSON.stringify(data.user));
       setFeedback(`Sesión iniciada como ${data.user.name} (${data.user.role})`);
     } catch (err) {
       setFeedback(err.message);
@@ -151,15 +150,15 @@ export default function HomePage() {
     setToken("");
     setUser(null);
     setOrders([]);
-    setKitchenOrders([]);
-    localStorage.removeItem("platoya_token");
-    localStorage.removeItem("platoya_user");
+    setShipments([]);
+    localStorage.removeItem("libroya_token");
+    localStorage.removeItem("libroya_user");
   }
 
   async function handleCreateOrder(e) {
     e.preventDefault();
     if (!token) {
-      setFeedback("Inicia sesión como cliente para crear tu pedido.");
+      setFeedback("Inicia sesión como cliente para confirmar tu compra.");
       return;
     }
     setFeedback("");
@@ -167,16 +166,12 @@ export default function HomePage() {
     try {
       const payload = {
         address,
-        items: cart.map((item) => ({ dishId: item._id, quantity: item.quantity })),
+        items: cart.map((item) => ({ bookId: item._id, quantity: item.quantity })),
       };
-      const data = await apiRequest("/api/orders", {
-        method: "POST",
-        body: payload,
-        token,
-      });
+      const data = await apiRequest("/api/orders", { method: "POST", body: payload, token });
       setCart([]);
       setOrders((prev) => [data.order, ...prev]);
-      setFeedback(`Pedido #${data.order._id.slice(-6)} creado en PENDING_PAYMENT. Ya puedes pagarlo.`);
+      setFeedback(`Orden #${data.order._id.slice(-6)} creada (PENDING_PAYMENT). Procede al pago.`);
     } catch (err) {
       setFeedback(err.message);
     } finally {
@@ -198,10 +193,9 @@ export default function HomePage() {
         body: { orderId, paypalOrderId: created.paypalOrderId },
         token,
       });
-      setOrders((prev) =>
-        prev.map((o) => (o._id === captured.order._id ? captured.order : o))
-      );
-      setFeedback(`Pago confirmado para #${orderId.slice(-6)}. Pedido enviado a cocina (PENDIENTE).`);
+      setOrders((prev) => prev.map((o) => (o._id === captured.order._id ? captured.order : o)));
+      await loadBooks();
+      setFeedback(`Pago confirmado para #${orderId.slice(-6)}. Stock actualizado y envío programado.`);
     } catch (err) {
       setFeedback(err.message);
     } finally {
@@ -218,10 +212,8 @@ export default function HomePage() {
         body: { status: nextStatus },
         token,
       });
-      setKitchenOrders((prev) =>
-        prev.map((o) => (o._id === data.order._id ? data.order : o))
-      );
-      setFeedback(`Pedido #${orderId.slice(-6)} actualizado a ${data.order.status}.`);
+      setShipments((prev) => prev.map((o) => (o._id === data.order._id ? data.order : o)));
+      setFeedback(`Envío #${orderId.slice(-6)} actualizado a ${data.order.status}.`);
     } catch (err) {
       setFeedback(err.message);
     } finally {
@@ -233,8 +225,8 @@ export default function HomePage() {
     <main className="mx-auto max-w-6xl px-4 py-8 space-y-8">
       <header className="flex flex-wrap items-center justify-between gap-4 border-b border-stone-800 pb-4">
         <div>
-          <h1 className="text-3xl font-bold text-amber-400">PlatoYa</h1>
-          <p className="text-sm text-stone-400">Reserva y pedido de platos en tiempo real</p>
+          <h1 className="text-3xl font-bold text-amber-400">LibroYa</h1>
+          <p className="text-sm text-stone-400">E-Commerce de libros, control de stock y envíos en tiempo real</p>
         </div>
         <div className="flex items-center gap-3 text-sm">
           {user?.role === "cliente" && (
@@ -245,10 +237,7 @@ export default function HomePage() {
           {user && (
             <>
               <span className="text-stone-300">{user.name} · {user.role}</span>
-              <button
-                onClick={handleLogout}
-                className="rounded-lg border border-stone-700 px-3 py-1 hover:bg-stone-800"
-              >
+              <button onClick={handleLogout} className="rounded-lg border border-stone-700 px-3 py-1 hover:bg-stone-800">
                 Salir
               </button>
             </>
@@ -281,7 +270,7 @@ export default function HomePage() {
             </button>
           </div>
           <p className="text-xs text-stone-400">
-            Cocinero demo: <code>cocinero@platoya.com</code> / <code>Cocina2026!</code>
+            Logística demo: <code>logistica@libroya.com</code> / <code>Envios2026!</code>
           </p>
           <form onSubmit={handleAuth} className="space-y-3">
             {authMode === "register" && (
@@ -315,21 +304,21 @@ export default function HomePage() {
               disabled={loading}
               className="w-full rounded-lg bg-amber-400 py-2 text-sm font-semibold text-stone-950 hover:bg-amber-300 disabled:opacity-50"
             >
-              {authMode === "register" ? "Crear cuenta cliente" : "Entrar"}
+              {authMode === "register" ? "Crear cuenta lector" : "Entrar"}
             </button>
           </form>
         </section>
       )}
 
-      {user?.role === "cocinero" ? (
+      {user?.role === "logistica" ? (
         <section className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-2xl font-semibold">Tablero de cocina (Kanban en tiempo real)</h2>
+            <h2 className="text-2xl font-semibold">Gestión de Envíos (Kanban en tiempo real)</h2>
             <span className="text-xs text-emerald-400">En vivo · Socket.IO</span>
           </div>
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-            {KANBAN_COLUMNS.map((col) => {
-              const colOrders = kitchenOrders.filter((o) => o.status === col.key);
+            {SHIPMENT_COLUMNS.map((col) => {
+              const colOrders = shipments.filter((o) => o.status === col.key);
               return (
                 <div key={col.key} className="rounded-2xl border border-stone-800 bg-stone-900/60 p-4 space-y-3">
                   <div className="flex items-center justify-between border-b border-stone-800 pb-2">
@@ -337,7 +326,7 @@ export default function HomePage() {
                     <span className="text-xs rounded-full bg-stone-800 px-2 py-0.5">{colOrders.length}</span>
                   </div>
                   {colOrders.length === 0 ? (
-                    <p className="text-xs text-stone-500">Sin pedidos aquí.</p>
+                    <p className="text-xs text-stone-500">Sin envíos en esta etapa.</p>
                   ) : (
                     colOrders.map((ord) => (
                       <div key={ord._id} className="rounded-xl border border-stone-800 bg-stone-950 p-3 space-y-2 text-xs">
@@ -345,11 +334,10 @@ export default function HomePage() {
                           <span>#{ord._id.slice(-6)}</span>
                           <span className="text-amber-400">${Number(ord.total).toFixed(2)}</span>
                         </div>
+                        <p className="text-stone-400">Destino: {ord.address}</p>
                         <ul className="space-y-1 text-stone-300">
                           {(ord.items || []).map((it, idx) => (
-                            <li key={idx}>
-                              {it.quantity}x {it.name}
-                            </li>
+                            <li key={idx}>{it.quantity}x {it.title}</li>
                           ))}
                         </ul>
                         {col.nextStatus && (
@@ -374,7 +362,7 @@ export default function HomePage() {
         <div className="grid gap-8 lg:grid-cols-3">
           <section className="lg:col-span-2 space-y-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-2xl font-semibold">Menú</h2>
+              <h2 className="text-2xl font-semibold">Catálogo de Libros</h2>
               <div className="flex flex-wrap gap-2">
                 {CATEGORIES.map((cat) => (
                   <button
@@ -393,25 +381,26 @@ export default function HomePage() {
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
-              {filteredDishes.map((dish) => (
+              {filteredBooks.map((book) => (
                 <article
-                  key={dish._id}
+                  key={book._id}
                   className="flex flex-col justify-between rounded-2xl border border-stone-800 bg-stone-900/60 p-4"
                 >
                   <div>
                     <div className="flex items-center justify-between text-xs text-amber-400 uppercase tracking-wide">
-                      <span>{dish.category}</span>
-                      <span className="font-bold text-sm">${Number(dish.price).toFixed(2)}</span>
+                      <span>{book.category} · Stock: {book.stock}</span>
+                      <span className="font-bold text-sm">${Number(book.price).toFixed(2)}</span>
                     </div>
-                    <h3 className="mt-1 text-lg font-semibold">{dish.name}</h3>
-                    <p className="mt-1 text-sm text-stone-400">{dish.description}</p>
+                    <h3 className="mt-1 text-lg font-semibold">{book.title}</h3>
+                    <p className="text-xs text-stone-300 font-medium">{book.author}</p>
+                    <p className="mt-1 text-sm text-stone-400">{book.description}</p>
                   </div>
                   <button
-                    onClick={() => addToCart(dish)}
-                    disabled={!dish.available}
+                    onClick={() => addToCart(book)}
+                    disabled={!book.available || book.stock <= 0}
                     className="mt-4 rounded-lg bg-stone-800 py-2 text-sm font-medium hover:bg-amber-400 hover:text-stone-950 disabled:opacity-40"
                   >
-                    {dish.available ? "Añadir" : "No disponible"}
+                    {book.available && book.stock > 0 ? "Añadir al carrito" : "Agotado"}
                   </button>
                 </article>
               ))}
@@ -420,33 +409,21 @@ export default function HomePage() {
 
           <aside className="space-y-6">
             <section className="rounded-2xl border border-stone-800 bg-stone-900/60 p-5 space-y-4">
-              <h2 className="text-xl font-semibold">Carrito</h2>
+              <h2 className="text-xl font-semibold">Carrito de compra</h2>
               {cart.length === 0 ? (
-                <p className="text-sm text-stone-400">Aún no has agregado platos.</p>
+                <p className="text-sm text-stone-400">Aún no has agregado libros.</p>
               ) : (
                 <ul className="space-y-3">
                   {cart.map((item) => (
                     <li key={item._id} className="flex items-center justify-between text-sm border-b border-stone-800 pb-2">
                       <div>
-                        <p className="font-medium">{item.name}</p>
+                        <p className="font-medium">{item.title}</p>
                         <p className="text-xs text-stone-400">${(item.price * item.quantity).toFixed(2)}</p>
                       </div>
                       <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => updateQuantity(item._id, -1)}
-                          className="h-7 w-7 rounded bg-stone-800 hover:bg-stone-700"
-                        >
-                          -
-                        </button>
+                        <button type="button" onClick={() => updateQuantity(item._id, -1)} className="h-7 w-7 rounded bg-stone-800 hover:bg-stone-700">-</button>
                         <span>{item.quantity}</span>
-                        <button
-                          type="button"
-                          onClick={() => updateQuantity(item._id, 1)}
-                          className="h-7 w-7 rounded bg-stone-800 hover:bg-stone-700"
-                        >
-                          +
-                        </button>
+                        <button type="button" onClick={() => updateQuantity(item._id, 1)} className="h-7 w-7 rounded bg-stone-800 hover:bg-stone-700">+</button>
                       </div>
                     </li>
                   ))}
@@ -454,10 +431,10 @@ export default function HomePage() {
               )}
 
               <form onSubmit={handleCreateOrder} className="space-y-3 pt-2">
-                <label className="block text-xs text-stone-400">Dirección de entrega</label>
+                <label className="block text-xs text-stone-400">Dirección de envío</label>
                 <input
                   type="text"
-                  placeholder="Ej. Calle 100 # 45-20"
+                  placeholder="Ej. Cra 43A # 14-20, Medellín"
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
                   required
@@ -472,16 +449,16 @@ export default function HomePage() {
                   disabled={loading || cart.length === 0}
                   className="w-full rounded-lg bg-amber-400 py-2.5 text-sm font-semibold text-stone-950 hover:bg-amber-300 disabled:opacity-40"
                 >
-                  Confirmar pedido
+                  Confirmar compra
                 </button>
               </form>
             </section>
 
             {user?.role === "cliente" && (
               <section className="rounded-2xl border border-stone-800 bg-stone-900/60 p-5 space-y-3">
-                <h2 className="text-xl font-semibold">Mis pedidos</h2>
+                <h2 className="text-xl font-semibold">Mis compras y envíos</h2>
                 {orders.length === 0 ? (
-                  <p className="text-sm text-stone-400">Sin pedidos registrados todavía.</p>
+                  <p className="text-sm text-stone-400">Sin compras registradas todavía.</p>
                 ) : (
                   <ul className="space-y-3 text-sm">
                     {orders.map((ord) => (
@@ -491,7 +468,7 @@ export default function HomePage() {
                           <span className="text-amber-400">${Number(ord.total).toFixed(2)}</span>
                         </div>
                         <p className="text-xs text-stone-400">
-                          Estado: <strong className="text-stone-200">{ord.status}</strong> · Pago: {ord.paymentStatus}
+                          Envío: <strong className="text-stone-200">{ord.status}</strong> · Pago: {ord.paymentStatus}
                         </p>
                         <p className="text-xs text-stone-400">Dirección: {ord.address}</p>
                         {ord.status === "PENDING_PAYMENT" && (
@@ -501,7 +478,7 @@ export default function HomePage() {
                             onClick={() => handlePayOrder(ord._id)}
                             className="w-full rounded-lg bg-amber-400 py-1.5 text-xs font-semibold text-stone-950 hover:bg-amber-300 disabled:opacity-40"
                           >
-                            Pagar pedido (PayPal Sandbox)
+                            Pagar orden (PayPal Sandbox)
                           </button>
                         )}
                       </li>

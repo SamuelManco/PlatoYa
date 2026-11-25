@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { Dish } from "../models/Dish.js";
+import { Book } from "../models/Book.js";
 import { Order } from "../models/Order.js";
 import { verifyToken, requireRole } from "../middleware/auth.middleware.js";
 import { canCookTransition } from "../config/stateMachine.js";
@@ -10,10 +10,10 @@ router.post("/", verifyToken(process.env.JWT_SECRET), requireRole("cliente"), as
   try {
     const { items, address } = req.body || {};
     if (!Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: "El pedido debe incluir al menos un plato" });
+      return res.status(400).json({ error: "El pedido debe incluir al menos un libro" });
     }
     if (!address || String(address).trim().length < 4) {
-      return res.status(400).json({ error: "Debes indicar una dirección de entrega válida" });
+      return res.status(400).json({ error: "Debes indicar una dirección de envío válida" });
     }
 
     const normalizedItems = [];
@@ -21,20 +21,22 @@ router.post("/", verifyToken(process.env.JWT_SECRET), requireRole("cliente"), as
 
     for (const rawItem of items) {
       const quantity = Number(rawItem?.quantity);
-      if (!rawItem?.dishId || !Number.isInteger(quantity) || quantity <= 0) {
-        return res.status(400).json({ error: "Cantidad o identificador de plato inválido" });
+      if (!rawItem?.bookId || !Number.isInteger(quantity) || quantity <= 0) {
+        return res.status(400).json({ error: "Cantidad o identificador de libro inválido" });
       }
 
-      const dish = await Dish.findById(rawItem.dishId);
-      if (!dish || !dish.available) {
-        return res.status(400).json({ error: "Uno de los platos no existe o no está disponible" });
+      const book = await Book.findById(rawItem.bookId);
+      if (!book || !book.available || book.stock < quantity) {
+        return res.status(400).json({
+          error: `Stock insuficiente o libro no disponible: ${book ? book.title : rawItem.bookId}`,
+        });
       }
 
-      const unitPrice = Number(dish.price);
+      const unitPrice = Number(book.price);
       recalculatedTotal += unitPrice * quantity;
       normalizedItems.push({
-        dishId: dish._id,
-        name: dish.name,
+        bookId: book._id,
+        title: book.title,
         unitPrice,
         quantity,
       });
@@ -64,7 +66,7 @@ router.get("/me", verifyToken(process.env.JWT_SECRET), requireRole("cliente"), a
   }
 });
 
-router.get("/kitchen", verifyToken(process.env.JWT_SECRET), requireRole("cocinero"), async (_req, res, next) => {
+router.get("/shipments", verifyToken(process.env.JWT_SECRET), requireRole("logistica"), async (_req, res, next) => {
   try {
     const orders = await Order.find({
       paymentStatus: "CAPTURED",
@@ -76,19 +78,19 @@ router.get("/kitchen", verifyToken(process.env.JWT_SECRET), requireRole("cociner
   }
 });
 
-router.patch("/:id/status", verifyToken(process.env.JWT_SECRET), requireRole("cocinero"), async (req, res, next) => {
+router.patch("/:id/status", verifyToken(process.env.JWT_SECRET), requireRole("logistica"), async (req, res, next) => {
   try {
     const { status } = req.body || {};
     const order = await Order.findById(req.params.id);
     if (!order) {
-      return res.status(404).json({ error: "Pedido no encontrado" });
+      return res.status(404).json({ error: "Orden no encontrada" });
     }
     if (order.paymentStatus !== "CAPTURED") {
-      return res.status(400).json({ error: "Solo se pueden gestionar pedidos pagados" });
+      return res.status(400).json({ error: "Solo se pueden despachar órdenes pagadas" });
     }
     if (!canCookTransition(order.status, status)) {
       return res.status(409).json({
-        error: `Transición no permitida de ${order.status} a ${status}`,
+        error: `Transición de envío no permitida de ${order.status} a ${status}`,
       });
     }
 
@@ -97,7 +99,7 @@ router.patch("/:id/status", verifyToken(process.env.JWT_SECRET), requireRole("co
 
     const io = req.app.get("io");
     if (io) {
-      io.to("kitchen").emit("order:statusChanged", order);
+      io.to("logistics").emit("order:statusChanged", order);
       io.to(`user:${order.userId.toString()}`).emit("order:updated", order);
     }
 

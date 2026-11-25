@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { Order } from "../models/Order.js";
+import { Book } from "../models/Book.js";
 import { Payment } from "../models/Payment.js";
 import { verifyToken, requireRole } from "../middleware/auth.middleware.js";
 
@@ -38,19 +39,15 @@ router.post(
   async (req, res, next) => {
     try {
       const { orderId } = req.body || {};
-      if (!orderId) {
-        return res.status(400).json({ error: "orderId es requerido" });
-      }
+      if (!orderId) return res.status(400).json({ error: "orderId es requerido" });
 
       const order = await Order.findById(orderId);
-      if (!order) {
-        return res.status(404).json({ error: "Pedido no encontrado" });
-      }
+      if (!order) return res.status(404).json({ error: "Orden no encontrada" });
       if (order.userId.toString() !== req.user.sub) {
-        return res.status(403).json({ error: "No eres propietario de este pedido" });
+        return res.status(403).json({ error: "No eres propietario de esta orden" });
       }
       if (order.paymentStatus === "CAPTURED" || order.status !== "PENDING_PAYMENT") {
-        return res.status(409).json({ error: "El pedido ya fue pagado o no está pendiente de pago" });
+        return res.status(409).json({ error: "La orden ya fue pagada o no está pendiente" });
       }
 
       const amountValue = Number(order.total).toFixed(2);
@@ -66,12 +63,7 @@ router.post(
           currency,
           status: "CREATED",
         });
-        return res.status(201).json({
-          paypalOrderId: mockOrderId,
-          amount: amountValue,
-          currency,
-          simulated: true,
-        });
+        return res.status(201).json({ paypalOrderId: mockOrderId, amount: amountValue, currency, simulated: true });
       }
 
       const accessToken = await getPaypalAccessToken();
@@ -84,15 +76,7 @@ router.post(
         },
         body: JSON.stringify({
           intent: "CAPTURE",
-          purchase_units: [
-            {
-              reference_id: order._id.toString(),
-              amount: {
-                currency_code: currency,
-                value: amountValue,
-              },
-            },
-          ],
+          purchase_units: [{ reference_id: order._id.toString(), amount: { currency_code: currency, value: amountValue } }],
         }),
       });
 
@@ -110,12 +94,7 @@ router.post(
         status: "CREATED",
       });
 
-      return res.status(201).json({
-        paypalOrderId: ppData.id,
-        amount: amountValue,
-        currency,
-        simulated: false,
-      });
+      return res.status(201).json({ paypalOrderId: ppData.id, amount: amountValue, currency, simulated: false });
     } catch (err) {
       return next(err);
     }
@@ -134,49 +113,57 @@ router.post(
       }
 
       const order = await Order.findById(orderId);
-      if (!order) {
-        return res.status(404).json({ error: "Pedido no encontrado" });
-      }
+      if (!order) return res.status(404).json({ error: "Orden no encontrada" });
       if (order.userId.toString() !== req.user.sub) {
-        return res.status(403).json({ error: "No eres propietario de este pedido" });
+        return res.status(403).json({ error: "No eres propietario de esta orden" });
       }
 
       const existingPayment = await Payment.findOne({ providerOrderId: paypalOrderId });
       if (!existingPayment || existingPayment.orderId.toString() !== order._id.toString()) {
-        return res.status(404).json({ error: "Orden de pago no válida para este pedido" });
+        return res.status(404).json({ error: "Orden de pago no válida" });
       }
 
       if (existingPayment.status === "CAPTURED" || order.paymentStatus === "CAPTURED") {
         return res.status(200).json({ order, idempotent: true });
       }
 
+      // Verificar y descontar stock en servidor
+      for (const item of order.items) {
+        const updatedBook = await Book.findOneAndUpdate(
+          { _id: item.bookId, stock: { $gte: item.quantity } },
+          { $inc: { stock: -item.quantity } },
+          { new: true }
+        );
+        if (!updatedBook) {
+          return res.status(409).json({ error: `Stock insuficiente para completar la compra de ${item.title}` });
+        }
+        if (updatedBook.stock === 0) {
+          updatedBook.available = false;
+          await updatedBook.save();
+        }
+      }
+
       let captureId = `CAP-${Date.now()}`;
 
       if (!hasPaypalCredentials()) {
         if (Number(existingPayment.amount).toFixed(2) !== Number(order.total).toFixed(2)) {
-          return res.status(400).json({ error: "Inconsistencia en el monto del pedido" });
+          return res.status(400).json({ error: "Inconsistencia en el monto de la orden" });
         }
       } else {
         const accessToken = await getPaypalAccessToken();
         const base = process.env.PAYPAL_API_BASE || "https://api-m.sandbox.paypal.com";
         const capRes = await fetch(`${base}/v2/checkout/orders/${paypalOrderId}/capture`, {
           method: "POST",
-          headers: {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json",
-          },
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
         });
         const capData = await capRes.json();
         const captureUnit = capData?.purchase_units?.[0]?.payments?.captures?.[0];
-        const capturedAmount = captureUnit?.amount?.value;
-        const capturedCurrency = captureUnit?.amount?.currency_code;
-
         if (
           !capRes.ok ||
           capData?.status !== "COMPLETED" ||
           !captureUnit ||
-          capturedCurrency !== "USD" ||
-          Number(capturedAmount).toFixed(2) !== Number(order.total).toFixed(2)
+          captureUnit?.amount?.currency_code !== "USD" ||
+          Number(captureUnit?.amount?.value).toFixed(2) !== Number(order.total).toFixed(2)
         ) {
           existingPayment.status = "FAILED";
           await existingPayment.save();
@@ -200,12 +187,13 @@ router.post(
         const publicSummary = {
           _id: order._id,
           items: order.items,
+          address: order.address,
           total: order.total,
           status: order.status,
           paymentStatus: order.paymentStatus,
           createdAt: order.createdAt,
         };
-        io.to("kitchen").emit("order:created", publicSummary);
+        io.to("logistics").emit("order:created", publicSummary);
         io.to(`user:${order.userId.toString()}`).emit("order:updated", order);
       }
 

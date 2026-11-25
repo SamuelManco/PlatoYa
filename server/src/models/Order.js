@@ -1,10 +1,10 @@
-﻿import mongoose from "mongoose";
+import mongoose from "mongoose";
 
 const orderItemSchema = new mongoose.Schema(
   {
-    dishId: { type: mongoose.Schema.Types.ObjectId, ref: "Dish", required: true },
-    name: { type: String, required: true },
-    unitPrice: { type: Number, required: true, min: 0.01 },
+    bookId: { type: mongoose.Schema.Types.ObjectId, ref: "Book", required: true },
+    title: { type: String, required: true },
+    unitPrice: { type: Number, required: true },
     quantity: { type: Number, required: true, min: 1 },
   },
   { _id: false }
@@ -23,7 +23,7 @@ const orderSchema = new mongoose.Schema(
     },
     paymentStatus: {
       type: String,
-      enum: ["CREATED", "APPROVED", "CAPTURED", "FAILED", "CANCELLED"],
+      enum: ["CREATED", "CAPTURED", "FAILED"],
       default: "CREATED",
     },
   },

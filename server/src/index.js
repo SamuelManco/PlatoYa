@@ -18,17 +18,12 @@ async function start() {
   const app = createApp(clientOrigin);
   const server = http.createServer(app);
   const io = new SocketIOServer(server, {
-    cors: {
-      origin: clientOrigin,
-      credentials: true,
-    },
+    cors: { origin: clientOrigin, credentials: true },
   });
 
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token;
-    if (!token) {
-      return next(new Error("Autenticación WebSocket requerida"));
-    }
+    if (!token) return next(new Error("Autenticación WebSocket requerida"));
     try {
       const payload = jwt.verify(token, jwtSecret);
       socket.user = payload;
@@ -41,18 +36,14 @@ async function start() {
   io.on("connection", (socket) => {
     const userId = socket.user?.sub;
     const role = socket.user?.role;
-    if (userId) {
-      socket.join(`user:${userId}`);
-    }
-    if (role === "cocinero") {
-      socket.join("kitchen");
-    }
+    if (userId) socket.join(`user:${userId}`);
+    if (role === "logistica") socket.join("logistics");
   });
 
   app.set("io", io);
 
   server.listen(port, host, () => {
-    console.log(`Servidor PlatoYa escuchando en http://${host}:${port}`);
+    console.log(`Servidor LibroYa escuchando en http://${host}:${port}`);
   });
 }
 

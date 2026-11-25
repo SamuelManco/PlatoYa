@@ -1,8 +1,8 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "PlatoYa | Pedidos y reservas en tiempo real",
-  description: "Sistema de reserva y pedido de platos de restaurante",
+  title: "LibroYa | E-Commerce de Libros y Envíos en Tiempo Real",
+  description: "Catálogo de libros, control de stock, pagos PayPal y seguimiento de envíos",
 };
 
 export default function RootLayout({ children }) {
